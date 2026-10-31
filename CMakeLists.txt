@@ -158,6 +158,18 @@ if(NOT EMSCRIPTEN)
   add_subdirectory(plugin/actuator)
   add_subdirectory(plugin/sensor)
   add_subdirectory(plugin/sdf)
+else()
+  # WASM cannot load the native shared plugin. Compile SDF implementations into
+  # mujoco; the WASM whole-archive link preserves register.cc's constructor.
+  target_sources(mujoco PRIVATE
+    plugin/sdf/sdf.cc
+    plugin/sdf/bolt.cc
+    plugin/sdf/bowl.cc
+    plugin/sdf/gear.cc
+    plugin/sdf/register.cc
+    plugin/sdf/nut.cc
+    plugin/sdf/torus.cc
+  )
 endif()
 add_subdirectory(plugin/gmsh_decoder)
 add_subdirectory(plugin/obj_decoder)

@@ -1,5 +1,18 @@
 # MuJoCo JavaScript Bindings
 
+## SDF plugins in this fork
+
+This fork includes the bundled bolt, bowl, gear, nut, and torus SDF plugins in
+WebAssembly builds. Their implementations and registration constructor are
+compiled into the static MuJoCo library and retained by the existing
+whole-archive link. No native shared-library loading is needed. Native builds
+continue to use the upstream shared plugins.
+
+The SDF plugin API and model syntax are unchanged. A custom SDF implementation
+still needs to be compiled and registered; this does not execute WGSL kernels.
+
+## Upstream bindings
+
 These are the canonical JavaScript and TypeScript bindings for the MuJoCo
 physics engine.
 
