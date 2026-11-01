@@ -481,8 +481,10 @@ void mjc_gradient(const mjModel* m, const mjData* d, const mjSDF* s,
     geomGradient(grad2, m, d, s->plugin[1], s->id[1], y, s->geomtype[1]);
     mju_mulMatTVec3(grad2, s->relmat, grad2);
     mju_normalize3(grad2);
+    // Preserve degeneracy for addPreContact's normal-length check. Normalizing
+    // a zero difference here replaces it with an arbitrary unit X direction,
+    // creating spurious contacts on coincident parallel faces (e.g. extrusions).
     mju_sub3(gradient, grad1, grad2);
-    mju_normalize3(gradient);
     break;
 
   case mjSDFTYPE_COLLISION:

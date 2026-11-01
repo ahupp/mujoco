@@ -84,6 +84,24 @@ TEST_F(SdfTest, SdfPrimitive) {
   }
 }
 
+// Coincident face gradients have no contact normal. Preserve zero so the
+// contact constructor can reject the candidate instead of inventing +X.
+TEST_F(SdfTest, DegenerateMidsurfaceGradient) {
+  char error[1024];
+  MjModelPtr model = LoadModelFromString(kSdfModel, error, sizeof(error));
+  ASSERT_THAT(model.get(), NotNull()) << error;
+  MjDataPtr data = MakeData(model);
+  const mjpPlugin* plugins[2] = {nullptr, nullptr};
+  int ids[2] = {0, 0};
+  mjtGeom types[2] = {mjGEOM_PLANE, mjGEOM_PLANE};
+  mjtNum position[3] = {0, 0, 0};
+  mjtNum rotation[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  mjSDF sdf{plugins, ids, mjSDFTYPE_MIDSURFACE, position, rotation, types};
+  mjtNum point[3] = {.1, .2, .3}, gradient[3];
+  mjc_gradient(model.get(), data.get(), &sdf, gradient, point);
+  EXPECT_EQ(mju_norm3(gradient), 0);
+}
+
 static constexpr char kFlexSdfModel[] = R"(
 <mujoco>
   <extension>
