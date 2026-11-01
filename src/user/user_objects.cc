@@ -4466,6 +4466,11 @@ void mjCGeom::SetInertia(void) {
 // mj_setConst computes from their size
 double mjCGeom::GetRBound(void) {
   if (type != mjGEOM_MESH && type != mjGEOM_SDF) { return 0; }
+  if (type == mjGEOM_SDF && plugin.active) {
+    double half[3] = {std::abs(aabb[0]) + aabb[3], std::abs(aabb[1]) + aabb[4],
+                      std::abs(aabb[2]) + aabb[5]};
+    return mju_norm3(half);
+  }
   const double* aamm     = mesh->aamm();
   double        haabb[3] = {std::max(std::abs(aamm[0]), std::abs(aamm[3])),
                             std::max(std::abs(aamm[1]), std::abs(aamm[4])),
@@ -4691,7 +4696,11 @@ void mjCGeom::Compile(void) {
     mjuu_addtovec(meshpos, pmesh->GetPosPtr(), 3);
 
     // accumulate mesh frame into geom frame
-    mjuu_frameaccum(pos, quat, meshpos, pmesh->GetQuatPtr());
+    // A plugin SDF is expressed in the authored geom frame. An incidental
+    // preview mesh may be recentered/rotated, but cannot move that field.
+    if (type != mjGEOM_SDF || !plugin.active) {
+      mjuu_frameaccum(pos, quat, meshpos, pmesh->GetQuatPtr());
+    }
 
     // re-express surfacevel in the compiled geom frame, which absorbed the mesh frame
     if (surfacevel[0] ||
@@ -4788,6 +4797,27 @@ void mjCGeom::Compile(void) {
     if (!(pplugin->capabilityflags & mjPLUGIN_SDF)) {
       throw mjCError(this, "plugin '%s' does not support sign distance fields", pplugin->name);
     }
+    // All broad-phase bounds must enclose the field, independently of mesh
+    // tessellation. Body BVHs are built from this geom AABB after compilation.
+    if (!pplugin->sdf_aabb || !pplugin->sdf_attribute) {
+      throw mjCError(this, "SDF plugin requires authoritative bounds and attributes");
+    }
+    std::vector<mjtNum> attributes(pplugin->nattribute);
+    std::vector<const char*> names(pplugin->nattribute), values(pplugin->nattribute);
+    for (int i = 0; i < pplugin->nattribute; ++i) {
+      names[i] = pplugin->attributes[i];
+      auto it = plugin_instance->config_attribs.find(names[i]);
+      values[i] = it == plugin_instance->config_attribs.end() ? "" : it->second.c_str();
+    }
+    pplugin->sdf_attribute(attributes.data(), names.data(), values.data());
+    pplugin->sdf_aabb(aabb, attributes.data());
+    for (int i = 0; i < 3; ++i) {
+      if (!std::isfinite(aabb[i]) || !std::isfinite(aabb[i + 3]) || aabb[i + 3] <= 0) {
+        throw mjCError(this, "SDF plugin bounds must be finite with positive half-extents");
+      }
+      size[i] = std::abs(aabb[i]) + aabb[i + 3];
+    }
+
   }
 
   // frame
@@ -4804,7 +4834,7 @@ void mjCGeom::PoseToSpec(bool position, bool orientation) {
   // compilation adds the frame of the mesh to the pose of a mesh geom: an offset mesh offsets
   // the position by the orientation, which then gives both
   bool offset = false;
-  if (mesh && (type == mjGEOM_MESH || type == mjGEOM_SDF)) {
+  if (mesh && (type == mjGEOM_MESH || (type == mjGEOM_SDF && !plugin.active))) {
     const double* meshpos = mesh->GetPosPtr();
     mjuu_frameaccuminv(specpos, specquat, meshpos, mesh->GetQuatPtr());
     offset = meshpos[0] || meshpos[1] || meshpos[2];
@@ -4869,7 +4899,7 @@ void mjCGeom::ShapeToSpec(bool newsize, bool position, bool orientation, bool ne
   // both parts back, and move the origin of the angular part back from the mesh position
   if (newvelocity) {
     mjuu_copyvec(spec.surfacevel, surfacevel, 6);
-    if (mesh && (type == mjGEOM_MESH || type == mjGEOM_SDF)) {
+    if (mesh && (type == mjGEOM_MESH || (type == mjGEOM_SDF && !plugin.active))) {
       double wxp[3];
       mjuu_rotVecQuat(spec.surfacevel, surfacevel, mesh->GetQuatPtr());
       mjuu_rotVecQuat(spec.surfacevel + 3, surfacevel + 3, mesh->GetQuatPtr());

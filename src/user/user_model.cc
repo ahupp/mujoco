@@ -2118,7 +2118,9 @@ void mjCModel::MakeInstances(bool reuse) {
   // the instances which sdf geoms use
   for (mjCMesh* mesh : CompiledMeshes()) { mesh->SetNeedSDF(false); }
   for (mjCGeom* geom : geoms_) {
-    if (geom->mesh && geom->spec.type == mjGEOM_SDF) { geom->mesh->SetNeedSDF(true); }
+    if (geom->mesh && geom->spec.type == mjGEOM_SDF && !geom->spec.plugin.active) {
+      geom->mesh->SetNeedSDF(true);
+    }
   }
 }
 

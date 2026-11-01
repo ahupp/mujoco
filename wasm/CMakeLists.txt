@@ -65,6 +65,7 @@ set(MUJOCO_WASM_LINK_LIBRARIES
 file(GLOB MUJOCO_WASM_FILES
     "codegen/generated/*.cc"
     "unpack.cc"
+    "sketchfield_sdf.cc"
 )
 
 if(NOT MUJOCO_WASM_FILES)
