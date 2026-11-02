@@ -537,3 +537,28 @@ For example:
    This could be achieved by extending the Three.js example or by compiling the
    MuJoCo platform C++ code using the Emscripten toolchain. Community
    suggestions and contributions are welcome!
+
+### Sketchfield SDF batching
+
+The Sketchfield fork appends an optional `sdf_batch` callback to `mjpPlugin`.
+All plugins must be rebuilt with this header; this changes the plugin struct ABI.
+The callback accepts packed local xyz points and writes distances plus optional
+packed gradients. It must be pure and agree with scalar queries independently
+of ordering, grouping, or per-candidate `compute` calls. Existing bundled plugins
+leave it null and continue through the scalar collision path.
+
+When both SDFs opt in, the pair search interleaves up to 32 independent starts,
+compacts active line-search lanes, and shares the center distance between
+objective and gradient calculations. The same scalar projection, normal,
+duplicate rejection and contact-cap rules run in original candidate order.
+The integrator, solver, broad phase, mesh/flex collision paths and MJCF options
+are unchanged. This is synchronous CPU batching, not GPU execution or SIMD.
+
+Compare against the pre-batching package with:
+
+```
+node wasm/tests/sketchfield_sdf_batch.mjs OLD/mujoco.js NEW/mujoco.js
+```
+
+The test covers contact ordering and values, zero/one/many search iterations,
+chunk boundaries, rotated fields, separated shapes and degenerate configurations.

@@ -176,6 +176,13 @@ typedef struct mjpPlugin_ {
 
   // bounding box of implicit surface
   void (*sdf_aabb)(mjtNum aabb[6], const mjtNum* attributes);
+
+  // Optional pure bulk query: count local xyz points, count distances, and
+  // optionally count xyz gradients (NULL for distance-only queries). Results
+  // must equal the scalar callbacks, independent of query order/grouping.
+  // Opts into interleaved SDF-pair searches without per-candidate compute calls.
+  void (*sdf_batch)(mjtNum* distances, mjtNum* gradients, const mjtNum* points,
+                    int count, const mjData* d, int instance);
 } mjpPlugin;
 
 typedef struct mjSDF_ {

@@ -17,6 +17,11 @@ EM_JS(void, SketchfieldGradient, (int field, double x, double y, double z, doubl
   HEAPF64[out / 8 + 1] = value[1];
   HEAPF64[out / 8 + 2] = value[2];
 });
+EM_JS(void, SketchfieldBatch, (int field, const double* points, int count,
+                              double* distances, double* gradients), {
+  Module.sketchfieldBatch(field, HEAPF64, points / 8, count,
+                         distances / 8, gradients ? gradients / 8 : 0);
+});
 namespace {
 const char* attributes[] = {"field", "cx", "cy", "cz", "hx", "hy", "hz"};
 void ParseAttributes(mjtNum* out, const char** names, const char** values) {
@@ -58,6 +63,10 @@ void Register() {
   p.sdf_staticdistance = +[](const mjtNum* x, const mjtNum* a) { return SketchfieldDistance(static_cast<int>(a[0]), x[0], x[1], x[2]); };
   p.sdf_attribute = ParseAttributes;
   p.sdf_aabb = +[](mjtNum* out, const mjtNum* a) { for (int i = 0; i < 6; ++i) out[i] = a[i + 1]; };
+  p.sdf_batch = +[](mjtNum* distances, mjtNum* gradients, const mjtNum* points,
+                    int count, const mjData* d, int i) {
+    SketchfieldBatch(static_cast<int>(d->plugin_data[i] - 1), points, count, distances, gradients);
+  };
   mjp_registerPlugin(&p);
 }
 }

@@ -670,6 +670,109 @@ static mjtNum stepGradient(mjtNum x[3], const mjModel* m, const mjSDF* s,
   return dist;
 }
 
+// Bound scratch space independently of the configured number of search starts.
+// Only plugins advertising pure, order-independent bulk queries use this path.
+#define SDF_BATCH_SIZE 32
+
+// Collision objective and, optionally, gradient for packed xyz points.
+static void collisionBatch(const mjSDF* s, const mjData* d, const mjtNum* x,
+                           int count, mjtNum* distance, mjtNum* gradient) {
+  mjtNum y[3*SDF_BATCH_SIZE], a[SDF_BATCH_SIZE], b[SDF_BATCH_SIZE];
+  mjtNum ga[3*SDF_BATCH_SIZE], gb[3*SDF_BATCH_SIZE];
+  for (int i=0; i < count; i++) {
+    mju_mulMatVec3(y+3*i, s->relmat, x+3*i);
+    mju_addTo3(y+3*i, s->relpos);
+  }
+  s->plugin[0]->sdf_batch(a, gradient ? ga : NULL, x, count, d, s->id[0]);
+  s->plugin[1]->sdf_batch(b, gradient ? gb : NULL, y, count, d, s->id[1]);
+  for (int i=0; i < count; i++) {
+    distance[i] = a[i] + b[i] + mju_abs(mju_max(a[i], b[i]));
+    if (gradient) {
+      mju_mulMatTVec3(gb+3*i, s->relmat, gb+3*i);
+      for (int j=0; j < 3; j++) gradient[3*i+j] = ga[3*i+j] + gb[3*i+j];
+      mju_addToScl3(gradient+3*i, a[i] > b[i] ? ga+3*i : gb+3*i,
+                   mju_max(a[i], b[i]) > 0 ? 1 : -1);
+    }
+  }
+}
+
+// Interleave independent searches while retaining stepGradient's arithmetic,
+// per-candidate backtracking and early-exit rules. Completed lanes are removed
+// from later queries; output points stay in their original candidate order.
+static void stepGradientBatch(mjtNum* x, mjtNum* distance, int count,
+                              const mjSDF* s, const mjData* d, int niter) {
+  const mjtNum c = .1, rho = .5, amin = 1e-4;
+  mjtNum points[3*SDF_BATCH_SIZE], values[SDF_BATCH_SIZE], gradients[3*SDF_BATCH_SIZE];
+  mjtNum x0[3*SDF_BATCH_SIZE], grad[3*SDF_BATCH_SIZE], dist0[SDF_BATCH_SIZE];
+  mjtNum alpha[SDF_BATCH_SIZE], wolfe[SDF_BATCH_SIZE];
+  int indices[SDF_BATCH_SIZE], state[SDF_BATCH_SIZE] = {0};  // 0: active, 1: line search, 2: done
+  for (int i=0; i < count; i++) distance[i] = mjMAXVAL;
+  for (int step=0; step < niter; step++) {
+    int n = 0;
+    for (int i=0; i < count; i++) {
+      if (state[i] == 2) continue;
+      indices[n] = i;
+      mju_copy3(points+3*n++, x+3*i);
+    }
+    if (!n) break;
+    collisionBatch(s, d, points, n, values, gradients);
+    for (int k=0; k < n; k++) {
+      int i = indices[k];
+      mju_copy3(grad+3*i, gradients+3*k);
+      if (isnan(grad[3*i]) || grad[3*i] > mjMAXVAL || grad[3*i] < -mjMAXVAL ||
+          isnan(grad[3*i+1]) || grad[3*i+1] > mjMAXVAL || grad[3*i+1] < -mjMAXVAL ||
+          isnan(grad[3*i+2]) || grad[3*i+2] > mjMAXVAL || grad[3*i+2] < -mjMAXVAL) {
+        state[i] = 2;
+        distance[i] = mjMAXVAL;
+        continue;
+      }
+      mju_copy3(x0+3*i, x+3*i);
+      dist0[i] = values[k];
+      alpha[i] = 2.;
+      wolfe[i] = -c * alpha[i] * mju_dot3(grad+3*i, grad+3*i);
+      state[i] = 1;
+    }
+    while (1) {
+      n = 0;
+      for (int i=0; i < count; i++) {
+        if (state[i] != 1) continue;
+        alpha[i] *= rho;
+        wolfe[i] *= rho;
+        mju_addScl3(x+3*i, x0+3*i, grad+3*i, -alpha[i]);
+        indices[n] = i;
+        mju_copy3(points+3*n++, x+3*i);
+      }
+      if (!n) break;
+      collisionBatch(s, d, points, n, values, NULL);
+      for (int k=0; k < n; k++) {
+        int i = indices[k];
+        distance[i] = values[k];
+        if (alpha[i] > amin && distance[i] - dist0[i] > wolfe[i]) continue;
+        state[i] = 0;
+        if (dist0[i] < distance[i]) {
+          mju_copy3(x+3*i, x0+3*i);
+          distance[i] = dist0[i];
+          state[i] = 2;
+        }
+      }
+    }
+  }
+}
+
+// Shared initialization keeps scalar and batched searches on the same starts.
+static void sdfStart(mjtNum x[3], int index, const mjtNum aabb[6],
+                     const mjtNum rotation2[9], const mjtNum offset2[3],
+                     const mjtNum rotation12[9], const mjtNum offset12[3]) {
+  mjtNum y[3];
+  for (int k=0; k < 3; k++) {
+    x[k] = aabb[k] + (aabb[k+3]-aabb[k]) * mju_Halton(index, k == 0 ? 2 : k == 1 ? 3 : 5);
+  }
+  mju_mulMatVec3(y, rotation2, x);
+  mju_addTo3(y, offset2);
+  mju_mulMatVec3(x, rotation12, y);
+  mju_addTo3(x, offset12);
+}
+
 //---------------------------- bounding box vs sdf -------------------------------------------------
 
 // stricter triangle collision
@@ -1057,7 +1160,7 @@ int mjc_SDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, mjtN
   const mjtNum* size2 = m->geom_aabb + 6*g2;
 
   int cnt = 0;
-  mjtNum x[3], y[3], dist2, vec1[3], vec2[3];
+  mjtNum x[3], dist2, vec1[3], vec2[3];
   mjtNum aabb1[6] = {mjMAXVAL, mjMAXVAL, mjMAXVAL, -mjMAXVAL, -mjMAXVAL, -mjMAXVAL};
   mjtNum aabb2[6] = {mjMAXVAL, mjMAXVAL, mjMAXVAL, -mjMAXVAL, -mjMAXVAL, -mjMAXVAL};
   mjtNum aabb[6]  = {mjMAXVAL, mjMAXVAL, mjMAXVAL, -mjMAXVAL, -mjMAXVAL, -mjMAXVAL};
@@ -1144,17 +1247,31 @@ int mjc_SDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, mjtN
   // minimize sdf intersection
   mjtNum contacts[3*mjMAXCONPAIR];
 
+  if (sdf_ptr[0] && sdf_ptr[1] && sdf_ptr[0]->sdf_batch && sdf_ptr[1]->sdf_batch) {
+    mjtNum points[3*SDF_BATCH_SIZE], distances[SDF_BATCH_SIZE];
+    for (int first=0; first < m->opt.sdf_initpoints; first += SDF_BATCH_SIZE) {
+      int count = m->opt.sdf_initpoints-first;
+      if (count > SDF_BATCH_SIZE) count = SDF_BATCH_SIZE;
+      for (int k=0; k < count; k++) {
+        sdfStart(points+3*k, first+k, aabb, rotation2, offset2, rotation12, offset12);
+      }
+      stepGradientBatch(points, distances, count, &sdf, d, m->opt.sdf_iterations);
+      // Preserve scalar projection, normal construction, duplicate rejection
+      // and contact-cap ordering. They are a small fraction of query traffic.
+      for (int k=0; k < count; k++) {
+        sdf.type = mjSDFTYPE_INTERSECTION;
+        dist2 = stepGradient(points+3*k, m, &sdf, d, 1);
+        sdf.type = mjSDFTYPE_MIDSURFACE;
+        cnt = addPreContact(contacts, con+cnt, points+3*k, pos2, quat2, dist2, cnt, m, &sdf, d, 0);
+        if (cnt >= mjMAXCONPAIR) return cnt;
+      }
+    }
+    return cnt;
+  }
+
   int i = 0, j = 0;
   while (i < m->opt.sdf_initpoints) {
-    x[0] = aabb[0] + (aabb[3]-aabb[0]) * mju_Halton(j, 2);
-    x[1] = aabb[1] + (aabb[4]-aabb[1]) * mju_Halton(j, 3);
-    x[2] = aabb[2] + (aabb[5]-aabb[2]) * mju_Halton(j, 5);
-
-    mju_mulMatVec3(y, rotation2, x);
-    mju_addTo3(y, offset2);
-
-    mju_mulMatVec3(x, rotation12, y);
-    mju_addTo3(x, offset12);
+    sdfStart(x, j, aabb, rotation2, offset2, rotation12, offset12);
 
     j++;
 
