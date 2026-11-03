@@ -1150,6 +1150,40 @@ int mjc_MeshSDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, 
   return cnt;
 }
 
+// Serialized search state: valid, time, discovery phase, relative position,
+// relative rotation, iteration budget, then one local xyz per authored start.
+// Two banks make additional forward calls at the same time idempotent.
+#define SDF_CACHE_HEADER 16
+static mjtNum* sdfPreviousCandidates(const mjModel* m, mjData* d, mjtNum* cache,
+                                     const mjtNum* offset, const mjtNum* rotation,
+                                     mjtNum radius, mjtNum** output, int* phase) {
+  int stride = SDF_CACHE_HEADER + 3*m->opt.sdf_initpoints;
+  mjtNum* previous = NULL;
+  for (int i=0; i < 2; i++) {
+    mjtNum* bank = cache + i*stride;
+    if (bank[0] && bank[1] > d->time) bank[0] = 0;
+    mjtNum elapsed = d->time - bank[1];
+    if (bank[0] && elapsed > 0 && elapsed <= 1.5*m->opt.timestep &&
+        bank[15] == m->opt.sdf_iterations && (!previous || bank[1] > previous[1])) {
+      previous = bank;
+    }
+  }
+  *output = previous == cache ? cache + stride : cache;
+  (*output)[0] = 0;  // failed/incomplete searches never publish candidate state
+  *phase = previous ? ((int)previous[2] + 1) % 8 : 0;
+  if (previous) {
+    mjtNum position_delta[3], rotation_delta[9];
+    mju_sub3(position_delta, offset, previous+3);
+    mju_sub(rotation_delta, rotation, previous+6, 9);
+    // Large relative motion, teleportation or missed ticks require fresh starts.
+    if (mju_norm3(position_delta) + radius*mju_norm(rotation_delta, 9) > 0.01*radius) {
+      previous = NULL;
+      *phase = 0;
+    }
+  }
+  return previous;
+}
+
 // collision between two SDFs
 int mjc_SDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, mjtNum margin) {
   const mjtNum* pos1  = d->geom_xpos + 3*g1;
@@ -1248,12 +1282,31 @@ int mjc_SDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, mjtN
   mjtNum contacts[3*mjMAXCONPAIR];
 
   if (sdf_ptr[0] && sdf_ptr[1] && sdf_ptr[0]->sdf_batch && sdf_ptr[1]->sdf_batch) {
+    mjtNum* cached = NULL;
+    mjtNum* next = NULL;
+    int phase = 0;
+    if (sdf_ptr[0]->sdf_cache && sdf_ptr[1]->sdf_cache &&
+        m->opt.sdf_initpoints > 0 && m->opt.sdf_initpoints <= 1000) {
+      int nvalue = 2*(SDF_CACHE_HEADER + 3*m->opt.sdf_initpoints);
+      mjtNum* cache = sdf_ptr[0]->sdf_cache(m, d, instance[0], g1, g2, nvalue);
+      if (cache) {
+        mjtNum radius = mju_min(mju_norm3(size1+3), mju_norm3(size2+3));
+        cached = sdfPreviousCandidates(m, d, cache, offset21, rotation21, radius, &next, &phase);
+      }
+    }
     mjtNum points[3*SDF_BATCH_SIZE], distances[SDF_BATCH_SIZE];
     for (int first=0; first < m->opt.sdf_initpoints; first += SDF_BATCH_SIZE) {
       int count = m->opt.sdf_initpoints-first;
       if (count > SDF_BATCH_SIZE) count = SDF_BATCH_SIZE;
       for (int k=0; k < count; k++) {
-        sdfStart(points+3*k, first+k, aabb, rotation2, offset2, rotation12, offset12);
+        int index = first+k;
+        // Every eighth pass is wholly fresh. Between those, rotate additional
+        // discovery starts; reuse never freezes the search to existing contacts.
+        if (cached && phase && index % 8 != phase) {
+          mju_copy3(points+3*k, cached+SDF_CACHE_HEADER+3*index);
+        } else {
+          sdfStart(points+3*k, index, aabb, rotation2, offset2, rotation12, offset12);
+        }
       }
       stepGradientBatch(points, distances, count, &sdf, d, m->opt.sdf_iterations);
       // Preserve scalar projection, normal construction, duplicate rejection
@@ -1261,10 +1314,19 @@ int mjc_SDF(const mjModel* m, mjData* d, mjPreContact* con, int g1, int g2, mjtN
       for (int k=0; k < count; k++) {
         sdf.type = mjSDFTYPE_INTERSECTION;
         dist2 = stepGradient(points+3*k, m, &sdf, d, 1);
+        if (next) mju_copy3(next+SDF_CACHE_HEADER+3*(first+k), points+3*k);
         sdf.type = mjSDFTYPE_MIDSURFACE;
         cnt = addPreContact(contacts, con+cnt, points+3*k, pos2, quat2, dist2, cnt, m, &sdf, d, 0);
         if (cnt >= mjMAXCONPAIR) return cnt;
       }
+    }
+    if (next) {
+      next[1] = d->time;
+      next[2] = phase;
+      mju_copy3(next+3, offset21);
+      mju_copy(next+6, rotation21, 9);
+      next[15] = m->opt.sdf_iterations;
+      next[0] = 1;
     }
     return cnt;
   }

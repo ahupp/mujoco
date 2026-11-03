@@ -183,6 +183,14 @@ typedef struct mjpPlugin_ {
   // Opts into interleaved SDF-pair searches without per-candidate compute calls.
   void (*sdf_batch)(mjtNum* distances, mjtNum* gradients, const mjtNum* points,
                     int count, const mjData* d, int instance);
+
+  // Optional temporal candidate storage for batched SDF-pair search. Return
+  // nvalue zero-initialized mjtNums belonging exclusively to ordered geom pair
+  // (geom1, geom2), or NULL to use fresh starts. Storage must be in plugin_state
+  // so reset, copyData and state serialization retain deterministic searches.
+  // Collision visualization resets (state == NULL) must not clear it.
+  mjtNum* (*sdf_cache)(const mjModel* m, mjData* d, int instance,
+                      int geom1, int geom2, int nvalue);
 } mjpPlugin;
 
 typedef struct mjSDF_ {
