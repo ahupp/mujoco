@@ -1163,7 +1163,10 @@ static mjtNum* sdfPreviousCandidates(const mjModel* m, mjData* d, mjtNum* cache,
     mjtNum* bank = cache + i*stride;
     if (bank[0] && bank[1] > d->time) bank[0] = 0;
     mjtNum elapsed = d->time - bank[1];
-    if (bank[0] && elapsed > 0 && elapsed <= 1.5*m->opt.timestep &&
+    // These are geometric seeds, refined against both current fields below.
+    // Their validity must not depend on the prospective integration timestep:
+    // an adaptive retry can change that option at exactly the same pose/time.
+    if (bank[0] && elapsed > 0 &&
         bank[15] == m->opt.sdf_iterations && (!previous || bank[1] > previous[1])) {
       previous = bank;
     }
@@ -1175,7 +1178,8 @@ static mjtNum* sdfPreviousCandidates(const mjModel* m, mjData* d, mjtNum* cache,
     mjtNum position_delta[3], rotation_delta[9];
     mju_sub3(position_delta, offset, previous+3);
     mju_sub(rotation_delta, rotation, previous+6, 9);
-    // Large relative motion, teleportation or missed ticks require fresh starts.
+    // Large relative motion or teleportation requires fresh starts. Elapsed
+    // time alone cannot stale geometric seeds at an unchanged relative pose.
     if (mju_norm3(position_delta) + radius*mju_norm(rotation_delta, 9) > 0.01*radius) {
       previous = NULL;
       *phase = 0;
